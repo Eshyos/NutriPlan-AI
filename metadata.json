@@ -1,0 +1,5 @@
+{
+  "name": "NutriPlan Calendar",
+  "description": "A smart meal planning application that generates balanced weekly menus based on your personal meal database, ensuring variety and nutritional balance using AI.",
+  "requestFramePermissions": []
+}
