@@ -10,6 +10,8 @@ export interface Meal {
   canBeLunch: boolean;
   canBeDinner: boolean;
   category?: string;
+  isSaturdayOnly?: boolean;
+  isSundayOnly?: boolean;
 }
 
 export interface DayMenu {

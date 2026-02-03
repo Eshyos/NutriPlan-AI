@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Meal, DayMenu, MealType, MenuPlan } from './types';
 import { generateMenuPlan } from './services/geminiService';
-import { fetchMealsFromMultipleSheets, fetchSavedPlansFromSheet, savePlanToRemote } from './services/sheetService';
+import { fetchMealsFromMultipleSheets, fetchSavedPlansFromSheet, savePlanToRemote, saveMealToRemote } from './services/sheetService';
 import MealCard from './components/MealCard';
 
 const STORAGE_SAVED_PLANS = 'nutriplan_saved_plans';
@@ -11,6 +11,7 @@ const STORAGE_CACHED_MEALS = 'nutriplan_cached_meals';
 
 const App: React.FC = () => {
   // Configuración por defecto
+  const [spreadsheetId, setSpreadsheetId] = useState<string>('1h1rVJVcTHmGFropcEI9whfkFxttVwe_wwL_FW7V_ITU');
   const [lunchGid, setLunchGid] = useState<string>('0');
   const [dinnerGid, setDinnerGid] = useState<string>('438085558');
   const [plansGid, setPlansGid] = useState<string>('1926889222'); 
@@ -32,7 +33,8 @@ const App: React.FC = () => {
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
 
   // Estados de modales
-  const [isEditingMeal, setIsEditingMeal] = useState<{ dayIndex: number, type: MealType } | null>(null);
+  const [isEditingMealInPlan, setIsEditingMealInPlan] = useState<{ dayIndex: number, type: MealType } | null>(null);
+  const [isEditingMealData, setIsEditingMealData] = useState<Meal | null>(null);
   const [swapSource, setSwapSource] = useState<{ dayIndex: number, type: MealType } | null>(null);
   const [savedPlans, setSavedPlans] = useState<MenuPlan[]>([]);
   const [isLoadingPlans, setIsLoadingPlans] = useState<boolean>(false);
@@ -47,6 +49,7 @@ const App: React.FC = () => {
     const savedConfig = localStorage.getItem(STORAGE_CONFIG);
     if (savedConfig) {
       const config = JSON.parse(savedConfig);
+      if (config.spreadsheetId) setSpreadsheetId(config.spreadsheetId);
       if (config.lunchGid) setLunchGid(config.lunchGid);
       if (config.dinnerGid) setDinnerGid(config.dinnerGid);
       if (config.plansGid) setPlansGid(config.plansGid);
@@ -67,7 +70,7 @@ const App: React.FC = () => {
   useEffect(() => {
     loadMeals();
     loadRemotePlans();
-  }, [lunchGid, dinnerGid, plansGid]);
+  }, [spreadsheetId, lunchGid, dinnerGid, plansGid]);
 
   useEffect(() => {
     if (toast) {
@@ -88,22 +91,22 @@ const App: React.FC = () => {
     }
   };
 
-  /**
-   * Fix for line 254: Implements the configuration form submit handler.
-   */
   const handleConfigSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const sId = (document.getElementById('spreadsheetIdInput') as HTMLInputElement).value;
     const lGid = (document.getElementById('lunchGidInput') as HTMLInputElement).value;
     const dGid = (document.getElementById('dinnerGidInput') as HTMLInputElement).value;
     const pGid = (document.getElementById('plansGidInput') as HTMLInputElement).value;
     const sUrl = (document.getElementById('saveUrlInput') as HTMLInputElement).value;
 
+    setSpreadsheetId(sId);
     setLunchGid(lGid);
     setDinnerGid(dGid);
     setPlansGid(pGid);
     setSaveUrl(sUrl);
 
     localStorage.setItem(STORAGE_CONFIG, JSON.stringify({
+      spreadsheetId: sId,
       lunchGid: lGid,
       dinnerGid: dGid,
       plansGid: pGid,
@@ -115,11 +118,11 @@ const App: React.FC = () => {
   };
 
   const loadMeals = async () => {
+    if (!spreadsheetId) return;
     setIsLoadingMeals(true);
     setSyncError(null);
     try {
-      const sheetMeals = await fetchMealsFromMultipleSheets(lunchGid, dinnerGid);
-      // Forzar orden alfabético al cargar
+      const sheetMeals = await fetchMealsFromMultipleSheets(spreadsheetId, lunchGid, dinnerGid);
       const sortedMeals = sheetMeals.sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' }));
       setMeals(sortedMeals);
       localStorage.setItem(STORAGE_CACHED_MEALS, JSON.stringify(sortedMeals));
@@ -132,16 +135,13 @@ const App: React.FC = () => {
   };
 
   const loadRemotePlans = async () => {
-    if (!plansGid || plansGid.trim() === '') return;
+    if (!spreadsheetId || !plansGid || plansGid.trim() === '') return;
     setIsLoadingPlans(true);
     try {
-      const remotePlans = await fetchSavedPlansFromSheet(plansGid);
+      const remotePlans = await fetchSavedPlansFromSheet(spreadsheetId, plansGid);
       setSavedPlans(prev => {
-        // Filtrar solo los locales de la lista anterior
         const localOnly = prev.filter(p => p.origin !== 'cloud');
-        // Combinar nuevos remotos con locales
         const combined = [...remotePlans, ...localOnly];
-        // Quitar duplicados por ID
         return combined.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
       });
     } catch (e) {
@@ -171,7 +171,6 @@ const App: React.FC = () => {
       const success = await savePlanToRemote(saveUrl, newPlan);
       if (success) {
         showToast("¡Plan guardado!");
-        // Volvemos a cargar para obtener el estado 'cloud'
         setTimeout(loadRemotePlans, 1000);
       } else {
         showToast("Error al subir al Excel (vía Script)", "error");
@@ -202,7 +201,28 @@ const App: React.FC = () => {
     if (type === MealType.LUNCH) updatedPlan[dayIndex].lunch = newMeal;
     else updatedPlan[dayIndex].dinner = newMeal;
     setMenuPlan(updatedPlan);
-    setIsEditingMeal(null);
+    setIsEditingMealInPlan(null);
+  };
+
+  const saveEditedMeal = async (updatedMeal: Meal) => {
+    const newMeals = meals.map(m => m.id === updatedMeal.id ? updatedMeal : m);
+    setMeals(newMeals);
+    localStorage.setItem(STORAGE_CACHED_MEALS, JSON.stringify(newMeals));
+    
+    setMenuPlan(prev => prev.map(day => ({
+      ...day,
+      lunch: day.lunch.id === updatedMeal.id ? updatedMeal : day.lunch,
+      dinner: day.dinner.id === updatedMeal.id ? updatedMeal : day.dinner
+    })));
+
+    if (saveUrl) {
+      showToast("Actualizando en el Excel...");
+      const success = await saveMealToRemote(saveUrl, updatedMeal);
+      if (success) showToast("Plato actualizado en la nube");
+      else showToast("Error al actualizar en la nube (no-cors)", "error");
+    }
+
+    setIsEditingMealData(null);
   };
 
   const handleSwap = (dayIndex: number, type: MealType) => {
@@ -279,6 +299,10 @@ const App: React.FC = () => {
               <h3 className="text-sm font-black text-slate-800 mb-6 uppercase tracking-widest">Configuración de Sheets</h3>
               <form onSubmit={handleConfigSubmit} className="space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-1.5 md:col-span-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase">Spreadsheet ID (de la URL del Excel)</label>
+                    <input id="spreadsheetIdInput" type="text" defaultValue={spreadsheetId} className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:border-emerald-500 shadow-sm" placeholder="ID del documento" />
+                  </div>
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-black text-slate-400 uppercase">GID Pestaña Comidas</label>
                     <input id="lunchGidInput" type="text" defaultValue={lunchGid} className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:border-emerald-500 shadow-sm" />
@@ -352,8 +376,8 @@ const App: React.FC = () => {
                   </div>
                 </div>
                 <div className="p-6 space-y-4">
-                  <MealCard meal={day.lunch} type={MealType.LUNCH} onEdit={() => setIsEditingMeal({ dayIndex: idx, type: MealType.LUNCH })} onSwap={() => handleSwap(idx, MealType.LUNCH)} isSwapSource={swapSource?.dayIndex === idx && swapSource?.type === MealType.LUNCH} />
-                  <MealCard meal={day.dinner} type={MealType.DINNER} onEdit={() => setIsEditingMeal({ dayIndex: idx, type: MealType.DINNER })} onSwap={() => handleSwap(idx, MealType.DINNER)} isSwapSource={swapSource?.dayIndex === idx && swapSource?.type === MealType.DINNER} />
+                  <MealCard meal={day.lunch} type={MealType.LUNCH} onEdit={() => setIsEditingMealInPlan({ dayIndex: idx, type: MealType.LUNCH })} onSwap={() => handleSwap(idx, MealType.LUNCH)} isSwapSource={swapSource?.dayIndex === idx && swapSource?.type === MealType.LUNCH} />
+                  <MealCard meal={day.dinner} type={MealType.DINNER} onEdit={() => setIsEditingMealInPlan({ dayIndex: idx, type: MealType.DINNER })} onSwap={() => handleSwap(idx, MealType.DINNER)} isSwapSource={swapSource?.dayIndex === idx && swapSource?.type === MealType.DINNER} />
                 </div>
               </div>
             ))}
@@ -387,7 +411,7 @@ const App: React.FC = () => {
                   <input type="text" placeholder="Filtrar por nombre o categoría..." value={dbSearch} onChange={(e) => setDbSearch(e.target.value)} className="w-full px-12 py-4 bg-white border border-slate-200 rounded-2xl font-bold text-sm outline-none focus:border-emerald-500 shadow-sm transition-all" />
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                 </div>
-                <a href="https://docs.google.com/spreadsheets/d/1h1rVJVcTHmGFropcEI9whfkFxttVwe_wwL_FW7V_ITU/edit" target="_blank" rel="noopener noreferrer" className="px-6 py-4 bg-emerald-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest shadow-lg shadow-emerald-200 flex items-center gap-2 hover:bg-emerald-700 transition-all">
+                <a href={`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`} target="_blank" rel="noopener noreferrer" className="px-6 py-4 bg-emerald-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest shadow-lg shadow-emerald-200 flex items-center gap-2 hover:bg-emerald-700 transition-all">
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" /></svg>
                   Editar Excel
                 </a>
@@ -397,12 +421,20 @@ const App: React.FC = () => {
             <div className="flex-1 overflow-y-auto p-10 custom-scrollbar bg-slate-50/30">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
                 {filteredMealsSorted.map(m => (
-                  <div key={m.id} className="p-6 bg-white border border-slate-100 rounded-3xl hover:border-emerald-300 hover:shadow-xl hover:scale-[1.02] transition-all duration-300 group">
-                    <div className="flex justify-between items-start mb-3">
+                  <div key={m.id} className="p-6 bg-white border border-slate-100 rounded-3xl hover:border-emerald-300 hover:shadow-xl hover:scale-[1.02] transition-all duration-300 group relative">
+                    <button 
+                      onClick={() => setIsEditingMealData(m)}
+                      className="absolute top-4 right-4 p-2 bg-slate-100 rounded-full opacity-0 group-hover:opacity-100 hover:bg-emerald-100 hover:text-emerald-600 transition-all"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" /></svg>
+                    </button>
+                    <div className="flex justify-between items-start mb-3 pr-8">
                       <span className="text-[10px] font-black text-emerald-600 uppercase bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-100">{m.category || 'General'}</span>
                       <div className="flex gap-1.5">
                         {m.canBeLunch && <div className="w-3 h-3 rounded-full bg-orange-400 shadow-sm" title="Apto para comida"></div>}
                         {m.canBeDinner && <div className="w-3 h-3 rounded-full bg-indigo-400 shadow-sm" title="Apto para cena"></div>}
+                        {m.isSaturdayOnly && <div className="w-3 h-3 rounded-full bg-emerald-400 shadow-sm" title="Solo Sábados"></div>}
+                        {m.isSundayOnly && <div className="w-3 h-3 rounded-full bg-rose-400 shadow-sm" title="Solo Domingos"></div>}
                       </div>
                     </div>
                     <h4 className="font-black text-slate-800 leading-tight group-hover:text-emerald-800 transition-colors">{m.name}</h4>
@@ -414,6 +446,59 @@ const App: React.FC = () => {
                   </div>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Editar Plato (Database) */}
+      {isEditingMealData && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in">
+          <div className="bg-white w-full max-w-lg rounded-[3.5rem] shadow-2xl overflow-hidden p-10 animate-in zoom-in-95">
+            <h3 className="text-2xl font-black text-slate-800 mb-8 tracking-tighter">Editar Plato</h3>
+            <div className="space-y-6">
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Nombre</label>
+                <input 
+                  type="text" 
+                  className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold outline-none focus:border-emerald-500"
+                  value={isEditingMealData.name}
+                  onChange={e => setIsEditingMealData({...isEditingMealData, name: e.target.value})}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Categoría</label>
+                <input 
+                  type="text" 
+                  className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold outline-none focus:border-emerald-500"
+                  value={isEditingMealData.category}
+                  onChange={e => setIsEditingMealData({...isEditingMealData, category: e.target.value})}
+                />
+              </div>
+              <div className="flex gap-8">
+                 <label className="flex items-center gap-3 cursor-pointer group">
+                   <input 
+                     type="checkbox" 
+                     className="w-5 h-5 accent-emerald-600 rounded"
+                     checked={isEditingMealData.isSaturdayOnly}
+                     onChange={e => setIsEditingMealData({...isEditingMealData, isSaturdayOnly: e.target.checked, isSundayOnly: false})}
+                   />
+                   <span className="text-xs font-bold text-slate-600 group-hover:text-emerald-600">Solo Sábados</span>
+                 </label>
+                 <label className="flex items-center gap-3 cursor-pointer group">
+                   <input 
+                     type="checkbox" 
+                     className="w-5 h-5 accent-emerald-600 rounded"
+                     checked={isEditingMealData.isSundayOnly}
+                     onChange={e => setIsEditingMealData({...isEditingMealData, isSundayOnly: e.target.checked, isSaturdayOnly: false})}
+                   />
+                   <span className="text-xs font-bold text-slate-600 group-hover:text-emerald-600">Solo Domingos</span>
+                 </label>
+              </div>
+            </div>
+            <div className="flex gap-4 mt-10">
+              <button onClick={() => setIsEditingMealData(null)} className="flex-1 py-5 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600">Cancelar</button>
+              <button onClick={() => saveEditedMeal(isEditingMealData)} className="flex-1 py-5 bg-emerald-600 text-white rounded-3xl text-[10px] font-black uppercase tracking-widest shadow-xl shadow-emerald-200">Guardar Cambios</button>
             </div>
           </div>
         </div>
@@ -489,31 +574,31 @@ const App: React.FC = () => {
       {/* Modal Naming */}
       {showSaveNamingModal && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in">
-          <div className="bg-white w-full max-w-md rounded-[3.5rem] shadow-2xl p-12 animate-in zoom-in-95">
+          <div className="bg-white w-full max-md rounded-[3.5rem] shadow-2xl p-12 animate-in zoom-in-95">
             <h3 className="text-3xl font-black text-slate-800 mb-8 tracking-tighter text-center">Nombre del Plan</h3>
             <input ref={saveNameRef} type="text" autoFocus className="w-full px-8 py-6 bg-slate-50 border-2 border-slate-100 rounded-3xl text-lg font-black outline-none focus:border-emerald-500 transition-all text-center focus:bg-white" defaultValue={`Plan ${new Date(startDate).toLocaleDateString()}`} onKeyDown={(e) => e.key === 'Enter' && executeSave()} />
             <div className="flex gap-4 mt-10">
-              <button onClick={() => setShowSaveNamingModal(false)} className="flex-1 py-5 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 transition-all">Cancelar</button>
+              <button onClick={() => setShowSaveNamingModal(false)} className="flex-1 py-5 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-600">Cancelar</button>
               <button onClick={executeSave} className="flex-1 py-5 bg-emerald-600 text-white rounded-3xl text-[10px] font-black uppercase tracking-widest shadow-xl shadow-emerald-200 active:scale-95 transition-all">Confirmar Guardado</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Sustituir Modal */}
-      {isEditingMeal && (
+      {/* Sustituir Modal (Plan) */}
+      {isEditingMealInPlan && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-in fade-in">
           <div className="bg-white w-full max-w-2xl rounded-[3.5rem] shadow-2xl overflow-hidden animate-in zoom-in-95 flex flex-col max-h-[85vh]">
             <div className="p-10 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
-              <h3 className="font-black text-2xl text-slate-800 tracking-tight uppercase">Sustituir {isEditingMeal.type}</h3>
-              <button onClick={() => setIsEditingMeal(null)} className="text-slate-400 text-xl font-black p-4 hover:bg-white rounded-full transition-all">✕</button>
+              <h3 className="font-black text-2xl text-slate-800 tracking-tight uppercase">Sustituir {isEditingMealInPlan.type}</h3>
+              <button onClick={() => setIsEditingMealInPlan(null)} className="text-slate-400 text-xl font-black p-4 hover:bg-white rounded-full transition-all">✕</button>
             </div>
             <div className="flex-1 overflow-y-auto p-10 grid grid-cols-1 gap-3 custom-scrollbar bg-slate-50/20">
               {meals
-                .filter(m => isEditingMeal.type === MealType.LUNCH ? m.canBeLunch : m.canBeDinner)
+                .filter(m => isEditingMealInPlan.type === MealType.LUNCH ? m.canBeLunch : m.canBeDinner)
                 .sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' }))
                 .map(m => (
-                  <button key={m.id} onClick={() => updateMealInPlan(isEditingMeal.dayIndex, isEditingMeal.type, m)} className="group flex items-center justify-between p-7 rounded-[2rem] border border-slate-100 hover:border-emerald-500 hover:bg-emerald-50 transition-all text-left shadow-sm hover:shadow-md">
+                  <button key={m.id} onClick={() => updateMealInPlan(isEditingMealInPlan.dayIndex, isEditingMealInPlan.type, m)} className="group flex items-center justify-between p-7 rounded-[2rem] border border-slate-100 hover:border-emerald-500 hover:bg-emerald-50 transition-all text-left shadow-sm hover:shadow-md">
                     <div>
                       <span className="text-sm font-black text-slate-700 block group-hover:text-emerald-700 transition-colors">{m.name}</span>
                       <span className="text-[9px] uppercase font-black text-slate-300 group-hover:text-emerald-400 mt-1 block">{m.category}</span>

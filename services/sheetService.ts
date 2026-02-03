@@ -1,19 +1,16 @@
 
 import { Meal, MenuPlan } from '../types';
 
-const BASE_URL = 'https://docs.google.com/spreadsheets/d/1h1rVJVcTHmGFropcEI9whfkFxttVwe_wwL_FW7V_ITU/export?format=csv';
+function getBaseUrl(spreadsheetId: string) {
+  return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv`;
+}
 
-/**
- * Procesa un texto CSV completo respetando saltos de línea dentro de comillas.
- * Es vital para leer JSON guardado en celdas de Excel.
- */
 function parseFullCSV(text: string): string[][] {
   const result: string[][] = [];
   let row: string[] = [];
   let cur = '';
   let inQuotes = false;
   
-  // Detectar delimitador (punto y coma o coma) basándose en la primera línea física
   const physicalLines = text.split(/\r?\n/);
   const firstLine = physicalLines[0] || '';
   const commaCount = (firstLine.match(/,/g) || []).length;
@@ -27,7 +24,7 @@ function parseFullCSV(text: string): string[][] {
     if (char === '"') {
       if (inQuotes && nextChar === '"') {
         cur += '"';
-        i++; // Saltar escape ""
+        i++;
       } else {
         inQuotes = !inQuotes;
       }
@@ -47,7 +44,6 @@ function parseFullCSV(text: string): string[][] {
     }
   }
   
-  // Procesar última celda/fila si el texto no termina en salto de línea
   if (cur !== '' || row.length > 0) {
     row.push(cur.trim());
     if (row.some(cell => cell !== '')) {
@@ -58,15 +54,16 @@ function parseFullCSV(text: string): string[][] {
   return result;
 }
 
-async function fetchFromGid(gid: string): Promise<string[][]> {
-  const url = `${BASE_URL}&gid=${gid}&t=${Date.now()}`;
+async function fetchFromGid(spreadsheetId: string, gid: string): Promise<string[][]> {
+  const url = `${getBaseUrl(spreadsheetId)}&gid=${gid}&t=${Date.now()}`;
   const response = await fetch(url, { cache: 'no-store' });
   if (!response.ok) throw new Error(`Error ${response.status}: No se pudo acceder a la pestaña ${gid}.`);
   const csvText = await response.text();
   return parseFullCSV(csvText);
 }
 
-export async function fetchMealsFromMultipleSheets(lunchGid: string, dinnerGid: string): Promise<Meal[]> {
+export async function fetchMealsFromMultipleSheets(spreadsheetId: string, lunchGid: string, dinnerGid: string): Promise<Meal[]> {
+  if (!spreadsheetId) return [];
   try {
     const mealMap: Map<string, Meal> = new Map();
 
@@ -74,7 +71,6 @@ export async function fetchMealsFromMultipleSheets(lunchGid: string, dinnerGid: 
       if (rows.length === 0) return;
       
       const headers = rows[0].map(h => h.toLowerCase().trim());
-      // Detectar columna de nombre
       const nameIdx = headers.findIndex(h => 
         h.includes('plato') || h.includes('nombre') || h.includes('comida') || 
         h.includes('cena') || h.includes('listado') || h.includes('receta')
@@ -82,8 +78,10 @@ export async function fetchMealsFromMultipleSheets(lunchGid: string, dinnerGid: 
       
       const finalNameIdx = nameIdx !== -1 ? nameIdx : 0;
       const catIdx = headers.findIndex(h => h.includes('categor') || h.includes('tipo') || h.includes('grupo'));
+      
+      const satIdx = headers.findIndex(h => h.includes('sabado') || h.includes('sábado'));
+      const sunIdx = headers.findIndex(h => h.includes('domingo'));
 
-      // Si la primera fila parece ser un plato y no una cabecera, empezamos desde 0
       const startIdx = (nameIdx === -1 && rows[0][0] && rows[0][0].length > 3) ? 0 : 1;
 
       for (let i = startIdx; i < rows.length; i++) {
@@ -96,29 +94,36 @@ export async function fetchMealsFromMultipleSheets(lunchGid: string, dinnerGid: 
         const name = rawName.trim();
         const key = name.toLowerCase();
         
+        const isSat = satIdx !== -1 ? (row[satIdx]?.toLowerCase().includes('si') || row[satIdx]?.toLowerCase().includes('true') || row[satIdx] === '1') : false;
+        const isSun = sunIdx !== -1 ? (row[sunIdx]?.toLowerCase().includes('si') || row[sunIdx]?.toLowerCase().includes('true') || row[sunIdx] === '1') : false;
+
         const existing = mealMap.get(key);
         if (existing) {
           if (isLunch) existing.canBeLunch = true;
           else existing.canBeDinner = true;
+          existing.isSaturdayOnly = existing.isSaturdayOnly || isSat;
+          existing.isSundayOnly = existing.isSundayOnly || isSun;
         } else {
           mealMap.set(key, {
             id: `${isLunch ? 'l' : 'd'}-${i}`,
             name: name,
             canBeLunch: isLunch,
             canBeDinner: !isLunch,
-            category: catIdx !== -1 && row[catIdx] ? row[catIdx] : 'General'
+            category: catIdx !== -1 && row[catIdx] ? row[catIdx] : 'General',
+            isSaturdayOnly: isSat,
+            isSundayOnly: isSun
           });
         }
       }
     };
 
     if (lunchGid && lunchGid.trim() !== '') {
-      const lunchRows = await fetchFromGid(lunchGid);
+      const lunchRows = await fetchFromGid(spreadsheetId, lunchGid);
       processRows(lunchRows, true);
     }
 
     if (dinnerGid && dinnerGid.trim() !== '') {
-      const dinnerRows = await fetchFromGid(dinnerGid);
+      const dinnerRows = await fetchFromGid(spreadsheetId, dinnerGid);
       processRows(dinnerRows, false);
     }
 
@@ -129,13 +134,28 @@ export async function fetchMealsFromMultipleSheets(lunchGid: string, dinnerGid: 
   }
 }
 
-export async function fetchSavedPlansFromSheet(gid: string): Promise<MenuPlan[]> {
-  if (!gid || gid.trim() === '') return [];
+export async function saveMealToRemote(url: string, meal: Meal): Promise<boolean> {
+  if (!url) return false;
   try {
-    const rows = await fetchFromGid(gid);
+    await fetch(url, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'UPDATE_MEAL', meal })
+    });
+    return true;
+  } catch (e) {
+    console.error("Error updating meal remotely:", e);
+    return false;
+  }
+}
+
+export async function fetchSavedPlansFromSheet(spreadsheetId: string, gid: string): Promise<MenuPlan[]> {
+  if (!spreadsheetId || !gid || gid.trim() === '') return [];
+  try {
+    const rows = await fetchFromGid(spreadsheetId, gid);
     if (rows.length === 0) return [];
     
-    // Verificamos si la primera fila ya contiene un JSON (es decir, no hay cabecera)
     const firstRowHasJson = rows[0].some(cell => {
       const c = cell.trim();
       return c.startsWith('{') && c.endsWith('}');
@@ -145,7 +165,6 @@ export async function fetchSavedPlansFromSheet(gid: string): Promise<MenuPlan[]>
     
     return dataRows.map((row, index) => {
       try {
-        // Buscamos la celda que contenga el objeto JSON del plan
         const planStr = row.find(cell => {
           const c = cell.trim();
           return c.startsWith('{') && c.endsWith('}');
@@ -155,19 +174,17 @@ export async function fetchSavedPlansFromSheet(gid: string): Promise<MenuPlan[]>
         
         const plan = JSON.parse(planStr.trim()) as MenuPlan;
         
-        // Aseguramos que el ID sea único para evitar que el filtro de la App lo ignore
         return { 
           ...plan, 
           id: plan.id || `cloud-${Date.now()}-${index}`,
           origin: 'cloud' as const 
         };
       } catch (e) {
-        console.warn("Error parseando fila de plan:", index, e);
         return null;
       }
     }).filter(p => p !== null) as MenuPlan[];
   } catch (e) {
-    console.error("Error cargando planes del historial:", e);
+    console.error("Error loading plans:", e);
     return [];
   }
 }
@@ -175,16 +192,15 @@ export async function fetchSavedPlansFromSheet(gid: string): Promise<MenuPlan[]>
 export async function savePlanToRemote(url: string, plan: MenuPlan): Promise<boolean> {
   if (!url) return false;
   try {
-    // Usamos el endpoint del Apps Script
     await fetch(url, {
       method: 'POST',
-      mode: 'no-cors', // Importante para Google Apps Script Web Apps
+      mode: 'no-cors',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(plan)
+      body: JSON.stringify({ action: 'SAVE_PLAN', plan })
     });
     return true;
   } catch (e) {
-    console.error("Error guardando plan remotamente:", e);
+    console.error("Error saving plan remotely:", e);
     return false;
   }
 }

@@ -17,10 +17,9 @@ export async function generateMenuPlan(
     throw new Error("Faltan platos. Asegúrate de tener platos configurados para comida y cena.");
   }
 
-  // Extraer los últimos platos usados para informar a la IA sobre la rotación
   const lastDishes = history
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(0, 3) // Tomar los últimos 3 planes
+    .slice(0, 3) 
     .flatMap(p => p.plan)
     .flatMap(d => [d.lunch.name, d.dinner.name]);
 
@@ -34,15 +33,18 @@ export async function generateMenuPlan(
     
     ${historyContext}
 
-    REGLA CRÍTICA DE DISPONIBILIDAD:
-    - Solo puedes usar para LUNCH los platos de la lista de COMIDAS.
-    - Solo puedes usar para DINNER los platos de la lista de CENAS.
+    REGLAS CRÍTICAS DE DISPONIBILIDAD Y CALENDARIO:
+    1. LUNCH: Solo usa platos de la lista de COMIDAS.
+    2. DINNER: Solo usa platos de la lista de CENAS.
+    3. SÁBADOS: Algunos platos están marcados como "SÁBADO ONLY". SOLO pueden usarse en sábados.
+    4. DOMINGOS: Algunos platos están marcados como "DOMINGO ONLY". SOLO pueden usarse en domingos.
+    5. No uses platos de fin de semana en días laborables.
 
     LISTA DE COMIDAS DISPONIBLES (LUNCH):
-    ${lunchOptions.map(m => `- ${m.name} [ID: ${m.id}]`).join('\n')}
+    ${lunchOptions.map(m => `- ${m.name} [ID: ${m.id}] ${m.isSaturdayOnly ? '(SÁBADO ONLY)' : ''} ${m.isSundayOnly ? '(DOMINGO ONLY)' : ''}`).join('\n')}
     
     LISTA DE CENAS DISPONIBLES (DINNER):
-    ${dinnerOptions.map(m => `- ${m.name} [ID: ${m.id}]`).join('\n')}
+    ${dinnerOptions.map(m => `- ${m.name} [ID: ${m.id}] ${m.isSaturdayOnly ? '(SÁBADO ONLY)' : ''} ${m.isSundayOnly ? '(DOMINGO ONLY)' : ''}`).join('\n')}
     
     INSTRUCCIONES DE DISEÑO:
     1. Equilibrio: Alterna proteínas (pescado, carne, legumbres) y tipos de platos (pasta, arroz, verdura).
